@@ -447,9 +447,7 @@ def switch_to_professional(driver, username, chat_id, email_to_invite):
         )
         driver.execute_script("arguments[0].click();", switch_btn)
         bot.send_message(chat_id, "🔄 'Switch to professional account' এ ক্লিক করা হয়েছে।")
-            WebDriverWait(driver, 20).until
-            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Which best describes you?')]"))
-        )
+            WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Which best describes you?')]")))
         bot.send_message(chat_id, "🏢 পেজ লোড হয়েছে। 'Business' সিলেক্ট করা হচ্ছে...")
            try:
             business_btn = WebDriverWait(driver, 10).until(
