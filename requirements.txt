@@ -1,5 +1,3 @@
-python-telegram-bot
-requests
 import telebot
 import threading
 import json
@@ -443,7 +441,6 @@ def switch_to_professional(driver, username, chat_id, email_to_invite):
         driver.execute_script("arguments[0].click();", done_btn)
         def handle_code_entry(driver, username, chat_id, email_to_invite):
     global waiting_for_code, received_code, active_driver
-    
     try:
         code_input = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='text'], input[inputmode='numeric'], input[name='code']")))
         
