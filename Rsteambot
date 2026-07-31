@@ -450,7 +450,7 @@ def switch_to_professional(driver, username, chat_id, email_to_invite):
         
         bot.send_message(chat_id, "⏳ 'Which best describes you?' পেজ লোড হওয়ার জন্য অপেক্ষা করা হচ্ছে...")
         WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "//*[conta
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Which best describes you?')]"))
         bot.send_message(chat_id, "⏳ 'Which best describes you?' পেজ লোড হওয়ার জন্য অপেক্ষা করা হচ্ছে...")
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Which best describes you?')]"))
