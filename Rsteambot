@@ -1,47 +1,891 @@
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import telebot
+import threading
+import json
+import os
+import time
+import random
+import tempfile
+import shutil
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import WebDriverException, TimeoutException
 
-# Enable logging to catch errors and trace execution
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# টেলিগ্রাম বট সেটআপ
+TOKEN = "8824437416:AAGj15dLQZa7pqbRD-z8u7GQXaYG7hR9iXc"  # আপনার দেওয়া টোকেন
+YOUR_CHAT_ID = 6204079163      # আপনার চ্যাট আইডি
+bot = telebot.TeleBot(TOKEN)
 
-# 1. Define command handlers
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a greeting message when the user types /start."""
-    user_name = update.effective_user.first_name
-    await update.message.reply_text(f"Hello {user_name}! I am an echo bot. Send me any message!")
+browser_lock = threading.Lock()
+active_driver = None
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Provides usage instructions when the user types /help."""
-    await update.message.reply_text("Just send me text and I'll send it back to you!")
+# কোড রিসিভ করার জন্য থ্রেডিং ইভেন্ট
+code_event = threading.Event()
+received_code = None
+waiting_for_code = False
 
-# 2. Define a text message handler
-async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Echoes back any text message the user sends."""
-    user_text = update.message.text
-    await update.message.reply_text(f"You said: {user_text}")
+# ব্ল্যাকলিস্ট লোড করা
+blacklist = set()
+if os.path.exists("blacklist.txt"):
+    with open("blacklist.txt", "r") as f:
+        blacklist = set(line.strip().lower() for line in f)
 
-# 3. Main function to initialize and run the bot
-def main():
-    # Replace with your actual token from BotFather
-    BOT_TOKEN = "8824437416:AAGj15dLQZa7pqbRD-z8u7GQXaYG7hR9iXc"
+# --- Smart Learning Error Log System ---
+ERROR_LOG_DIR = r"C:\vpn"
+ERROR_LOG_FILE = os.path.join(ERROR_LOG_DIR, "error_log.txt")
+SCREENSHOT_DIR = os.path.join(ERROR_LOG_DIR, "screenshots")
+USED_CATS_FILE = os.path.join(ERROR_LOG_DIR, "used_categories.txt")
+
+# ফোল্ডার তৈরি করা
+os.makedirs(ERROR_LOG_DIR, exist_ok=True)
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+def log_error(driver, context_msg, exception_msg):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    url = "N/A"
+    if driver:
+        try:
+            url = driver.current_url
+        except:
+            pass
+            
+    log_entry = f"[{timestamp}] Context: {context_msg} | Error: {exception_msg} | URL: {url}\n"
     
-    # Initialize the application
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Register the command and message handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    
-    # Filter only text messages (ignore images, audio, or command triggers)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
-    
-    # Start checking for updates (Polling method)
-    print("Bot is starting up... Press Ctrl+C to stop.")
-    app.run_polling()
+    try:
+        with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+    except Exception as e:
+        print(f"Log file write error: {e}")
+        
+    ss_path = None
+    if driver:
+        try:
+            ss_name = f"error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            ss_path = os.path.join(SCREENSHOT_DIR, ss_name)
+            driver.save_screenshot(ss_path)
+        except:
+            pass
+            
+    return ss_path
 
-if __name__ == '__main__':
-    main()
+def cleanup_driver(driver):
+    if driver:
+        temp_dir = getattr(driver, 'temp_profile_dir', None)
+        try:
+            driver.quit()
+        except:
+            pass
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+
+def login_to_instagram(username, chat_id, email_to_invite):
+    global active_driver, waiting_for_code, received_code
+    
+    if not browser_lock.acquire(blocking=False):
+        bot.send_message(chat_id, "⏳ আগের ব্রাউজার চলছে। বন্ধ করতে /stop দিন বা অপেক্ষা করুন।")
+        return
+
+    driver = None
+    try:
+        bot.send_message(chat_id, f"🚀 {username} দিয়ে Edge ব্রাউজারে লগিন শুরু হচ্ছে...")
+        
+        temp_profile_dir = tempfile.mkdtemp(prefix="ig_edge_profile_")
+        
+        edge_options = Options()
+        edge_options.add_argument(f"--user-data-dir={temp_profile_dir}")
+        edge_options.add_argument("--start-maximized")
+        edge_options.add_argument("--disable-notifications")
+        edge_options.page_load_strategy = 'normal'
+        
+        user_agents = [
+            "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 12; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (Linux; Android 14; SM-G991U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
+        ]
+        chosen_ua = random.choice(user_agents)
+        
+        mobile_emulation = {
+            "deviceMetrics": { "width": random.choice([360, 390, 412]), "height": random.choice([780, 844, 915]), "pixelRatio": random.choice([2.0, 2.625, 3.0]) },
+            "userAgent": chosen_ua
+        }
+        edge_options.add_experimental_option("mobileEmulation", mobile_emulation)
+        edge_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        edge_options.add_experimental_option('useAutomationExtension', False)
+        edge_options.add_argument("--disable-blink-features=AutomationControlled")
+        
+        driver = webdriver.Edge(options=edge_options)
+        active_driver = driver
+        driver.temp_profile_dir = temp_profile_dir
+        
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        })
+        
+        timezones = ["America/New_York", "Europe/London", "Asia/Dhaka", "America/Los_Angeles", "Asia/Kolkata", "Europe/Berlin"]
+        try:
+            driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": random.choice(timezones)})
+        except:
+            pass
+        
+        driver.get("https://www.instagram.com/accounts/login/")
+        time.sleep(5)
+        
+        for _ in range(3):
+            page_src = driver.page_source.lower()
+            if "please wait a few minutes before you try again" in page_src or "isn't working right now" in page_src:
+                bot.send_message(chat_id, "⚠️ ইনস্টাগ্রাম আইপি ব্লক করেছে। ১০ সেকেন্ড অপেক্ষা করে রিফ্রেশ করা হচ্ছে...")
+                time.sleep(10)
+                driver.refresh()
+                time.sleep(5)
+            else:
+                try:
+                    login_btns = driver.find_elements(By.XPATH, "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or @type='submit']")
+                    if len(login_btns) > 0:
+                        bot.send_message(chat_id, "✅ লগিন পেজ সফলভাবে লোড হয়েছে! 'Log in' বাটন পাওয়া গেছে।")
+                        break
+                    else:
+                        raise Exception("Login button not found yet")
+                except:
+                    bot.send_message(chat_id, "⏳ 'Log in' বাটন খুঁজে পাওয়া যায়নি, ৫ সেকেন্ড অপেক্ষা করে রিফ্রেশ করা হচ্ছে...")
+                    time.sleep(5)
+                    driver.refresh()
+                    time.sleep(3)
+        
+        try:
+            driver.switch_to.frame(0)
+        except:
+            driver.switch_to.default_content()
+            
+        try:
+            cookie_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Allow') or contains(text(), 'Accept') or contains(text(), 'Only allow essential cookies')]")
+            driver.execute_script("arguments[0].click();", cookie_btn)
+            time.sleep(1)
+        except:
+            driver.switch_to.default_content()
+            
+        bot.send_message(chat_id, "ইনপুট ফিল্ড খোঁজা হচ্ছে...")
+        
+        username_field = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[name='username']")))
+        password_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        
+        actions = ActionChains(driver)
+        actions.click(username_field).send_keys(username).perform()
+        time.sleep(0.5)
+        actions.click(password_field).send_keys("afrin10").perform()
+        time.sleep(1)
+        
+        bot.send_message(chat_id, "⌨️ ডাটা বসানো হয়েছে, কিবোর্ড থেকে ২ বার Tab এবং Enter দেওয়া হচ্ছে...")
+        
+        actions.send_keys(Keys.TAB).perform()
+        time.sleep(0.5)
+        actions.send_keys(Keys.TAB).perform()
+        time.sleep(0.5)
+        actions.send_keys(Keys.ENTER).perform()
+        
+        login_failed = False
+        code_required = False
+        
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: "auth_platform/codeentry" in d.current_url or 
+                          "check your email" in d.page_source.lower() or
+                          "accounts/suspended" in d.current_url or
+                          "confirm you're human" in d.page_source.lower() or
+                          "incorrect" in d.page_source.lower()
+            )
+            
+            current_url = driver.current_url
+            page_source = d.page_source.lower()
+            
+            if "accounts/suspended" in current_url or "confirm you're human to use your profile" in page_source:
+                bot.send_message(chat_id, f"🚫 একাউন্টটি ডিসেবল বা সাসপেন্ড করা হয়েছে! '{username}' কে ব্ল্যাকলিস্ট করা হলো।")
+                blacklist.add(username.lower())
+                with open("blacklist.txt", "a") as f:
+                    f.write(f"{username.lower()}\n")
+                cleanup_driver(driver)
+                active_driver = None
+                browser_lock.release()
+                return
+                
+            elif "auth_platform/codeentry" in current_url or "check your email" in page_source:
+                bot.send_message(chat_id, "📧 লগিন সফল! ইনস্টাগ্রাম ইমেইলে কোড পাঠিয়েছে।")
+                code_required = True
+                
+            elif "incorrect" in page_source:
+                bot.send_message(chat_id, "❌ লগিন ব্যর্থ! (ভুল ইউজারনেম বা পাসওয়ার্ড)\n\n🔁 অনুগ্রহ করে আবার নতুন ইউজারনেম পাঠান:")
+                login_failed = True
+                
+        except TimeoutException:
+            bot.send_message(chat_id, "✅ লগিন সফল হয়েছে! ইনস্টাগ্রাম হোমে যাওয়ার চেষ্টা করা হচ্ছে...")
+            check_home_page(driver, username, chat_id, email_to_invite)
+            
+        if login_failed:
+            cleanup_driver(driver)
+            active_driver = None
+            browser_lock.release()
+            return
+            
+        if code_required:
+            handle_code_entry(driver, username, chat_id, email_to_invite)
+
+    except Exception as e:
+        error_msg = str(e)
+        if "Stacktrace" in error_msg:
+            error_msg = "এলিমেন্ট ব্লক করা হয়েছে বা লোড হয়নি।"
+            
+        ss_path = log_error(driver, "Login Process", error_msg)
+        if driver:
+            try:
+                with open(ss_path, 'rb') as photo:
+                    bot.send_photo(chat_id, photo, caption=f"❌ সমস্যা: {error_msg}")
+            except:
+                bot.send_message(chat_id, f"❌ সমস্যা: {error_msg}")
+            
+        cleanup_driver(driver)
+        active_driver = None
+        browser_lock.release()
+
+
+def check_home_page(driver, username, chat_id, email_to_invite):
+    try:
+        bot.send_message(chat_id, "🏠 ইনস্টাগ্রাম হোমপেজে যাওয়ার চেষ্টা করা হচ্ছে...")
+        driver.get("https://www.instagram.com/")
+        time.sleep(3)
+        
+        try:
+            cookie_consent_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Allow all cookies') or contains(text(), 'Allow') or contains(text(), 'Only allow essential cookies')]"))
+            )
+            driver.execute_script("arguments[0].click();", cookie_consent_btn)
+            bot.send_message(chat_id, "🍪 কুকিজ কনসেন্ট পেজ এসেছিল, একসেপ্ট করা হয়েছে।")
+            time.sleep(3)
+        except:
+            pass
+            
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, "//nav | //div[contains(@role, 'navigation')]")))
+        
+        if "accounts/suspended" in driver.current_url or "confirm you're human to use your profile" in driver.page_source.lower():
+            if username.lower() not in blacklist:
+                blacklist.add(username.lower())
+                with open("blacklist.txt", "a") as f:
+                    f.write(f"{username.lower()}\n")
+            bot.send_message(chat_id, f"🚫 একাউন্টটি সাসপেন্ড করা হয়েছে! '{username}' ব্ল্যাকলিস্ট করা হলো।")
+            cleanup_driver(driver)
+            global active_driver
+            active_driver = None
+            browser_lock.release()
+            return
+
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'save your login info')]"))
+            )
+            
+            popup_closed = False
+            try:
+                close_btn = driver.find_element(By.XPATH, "//button[@aria-label='Close' or @aria-label='close'] | //div[@role='button' and @aria-label='Close'] | //svg[@aria-label='Close']")
+                driver.execute_script("arguments[0].click();", close_btn)
+                bot.send_message(chat_id, "🤖 'Save your login info?' পপআপ 'X' বাটনে ক্লিক করে বন্ধ করা হয়েছে।")
+                popup_closed = True
+                time.sleep(2)
+            except:
+                pass
+                
+            if not popup_closed:
+                try:
+                    save_btn = driver.find_element(By.XPATH, "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'save') or contains(text(), 'Not now')]")
+                    driver.execute_script("arguments[0].click();", save_btn)
+                    bot.send_message(chat_id, "🤖 'Save your login info?' পপআপ সেভ বাটনে ক্লিক করে বন্ধ করা হয়েছে।")
+                    time.sleep(3)
+                except:
+                    pass
+        except:
+            pass
+
+        final_url = driver.current_url
+        
+        if "instagram.com" in final_url and "accounts/login" not in final_url:
+            bot.send_message(chat_id, "✅ ইনস্টাগ্রাম হোমে ঠিকমতো পৌঁছে গেছে!")
+            
+        perform_follow_action(driver, chat_id)
+        go_to_settings(driver, username, chat_id, email_to_invite)
+            
+    except Exception as e:
+        error_msg = str(e)
+        if "Stacktrace" in error_msg:
+            error_msg = "এলিমেন্ট ব্লক করা হয়েছে বা লোড হয়নি।"
+        log_error(driver, "Home Page Check", error_msg)
+        bot.send_message(chat_id, f"⚠️ হোম পেজ চেক করতে সমস্যা: {error_msg}. C:\\vpn তে লগ সেভ করা হয়েছে।")
+
+
+def perform_follow_action(driver, chat_id):
+    try:
+        bot.send_message(chat_id, "🔍 'Suggested for you' লেখা খোঁজা হচ্ছে...")
+        
+        suggested_found = False
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 300);")
+            try:
+                WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Suggested for you')]")))
+                suggested_found = True
+                break
+            except:
+                continue
+                
+        if not suggested_found:
+            bot.send_message(chat_id, "ℹ️ 'Suggested for you' লেখা পাওয়া যায়নি, ফলো স্টেপ স্কিপ করা হলো।")
+            return
+            
+        bot.send_message(chat_id, "✅ 'Suggested for you' পাওয়া গেছে। ফলো বাটন খোঁজা হচ্ছে...")
+        
+        target_follows = random.randint(1, 6)
+        followed_count = 0
+        
+        while followed_count < target_follows:
+            follow_elements = driver.find_elements(By.XPATH, "//*[normalize-space(text())='Follow' and (self::button or self::a or self::div[@role='button'] or self::span)]")
+            
+            valid_btn = None
+            for el in follow_elements:
+                try:
+                    if el.is_displayed():
+                        valid_btn = el
+                        break
+                except:
+                    continue
+                
+            if not valid_btn:
+                driver.execute_script("window.scrollBy(0, 500);")
+                time.sleep(2)
+                follow_elements = driver.find_elements(By.XPATH, "//*[normalize-space(text())='Follow' and (self::button or self::a or self::div[@role='button'] or self::span)]")
+                for el in follow_elements:
+                    try:
+                        if el.is_displayed():
+                            valid_btn = el
+                            break
+                    except:
+                        continue
+                if not valid_btn:
+                    break
+                    
+            btn = valid_btn
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                time.sleep(random.uniform(1.0, 2.5))
+                
+                driver.execute_script("arguments[0].click();", btn)
+                
+                try:
+                    WebDriverWait(driver, 5).until(lambda d: btn.text.lower() in ['following', 'requested', 'follow back', 'followed'])
+                    followed_count += 1
+                    bot.send_message(chat_id, f"➕ ফলো করা হয়েছে ({followed_count}/{target_follows})।")
+                except:
+                    time.sleep(2)
+                    followed_count += 1
+                    bot.send_message(chat_id, f"➕ ফলো বাটনে ক্লিক করা হয়েছে ({followed_count}/{target_follows})।")
+                
+                wait_time = random.uniform(8.0, 15.0)
+                bot.send_message(chat_id, f"⏳ হিউমেন ইফেক্টের জন্য {int(wait_time)} সেকেন্ড অপেক্ষা করা হচ্ছে...")
+                time.sleep(wait_time)
+            except:
+                continue
+                
+        if followed_count > 0:
+            bot.send_message(chat_id, f"👥 সর্বমোট {followed_count} টি একাউন্টে ফলো করা সম্পন্ন হয়েছে।")
+        else:
+            bot.send_message(chat_id, "ℹ️ ফলো করার মতো বাটন পাওয়া যায়নি।")
+            
+    except Exception as e:
+        error_msg = str(e)
+        log_error(driver, "Follow Action", error_msg)
+        bot.send_message(chat_id, f"⚠️ ফলো করার সময় সমস্যা: {error_msg}")
+
+
+def go_to_settings(driver, username, chat_id, email_to_invite):
+    try:
+        bot.send_message(chat_id, "⚙️ ইনস্টাগ্রাম সেটিংসে যাওয়া হচ্ছে...")
+        driver.get("https://www.instagram.com/accounts/settings/?entrypoint=profile")
+        time.sleep(3)
+        
+        bot.send_message(chat_id, "🛠️ 'Account type and tools' বা 'Business tools and controls' অপশন খোঁজা হচ্ছে...")
+        
+        account_type_btn = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Account type and tools') or contains(text(), 'Account Type and Tools') or contains(text(), 'Business tools and controls')]"))
+        )
+        driver.execute_script("arguments[0].click();", account_type_btn)
+        time.sleep(3)
+        
+        page_source = driver.page_source.lower()
+        
+        if "switch to creator account" in page_source or "switch to personal account" in page_source:
+            bot.send_message(chat_id, "✅ একাউন্টটি ইতিমধ্যে প্রফেশনাল (বিজনেস/ক্রিয়েটর) মোডে আছে।")
+            handle_meta_business_suite(driver, username, email_to_invite, chat_id)
+            return
+            
+        elif "switch to professional account" in page_source:
+            bot.send_message(chat_id, "ℹ️ একাউন্টটি পারসনাল মোডে আছে। প্রফেশনালে সুইচ করা হচ্ছে...")
+            switch_to_professional(driver, username, chat_id, email_to_invite)
+        else:
+            bot.send_message(chat_id, "❓ একাউন্টের টাইল বুঝতে পারছি না। ব্রাউজার ম্যানুয়ালি চেক করুন।")
+        
+    except Exception as e:
+        error_msg = str(e)
+        log_error(driver, "Go to Settings", error_msg)
+        bot.send_message(chat_id, f"⚠️ সেটিংস পেজে যেতে সমস্যা: {error_msg}")
+def switch_to_professional(driver, username, chat_id, email_to_invite):
+    try:
+        switch_btn = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Switch to professional account')]"))
+        )
+        driver.execute_script("arguments[0].click();", switch_btn)
+        bot.send_message(chat_id, "🔄 'Switch to professional account' এ ক্লিক করা হয়েছে।")
+        
+        bot.send_message(chat_id, "⏳ 'Which best describes you?' পেজ লোড হওয়ার জন্য অপেক্ষা করা হচ্ছে...")
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, "//*[conta
+        bot.send_message(chat_id, "⏳ 'Which best describes you?' পেজ লোড হওয়ার জন্য অপেক্ষা করা হচ্ছে...")
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Which best describes you?')]"))
+        )
+        bot.send_message(chat_id, "🏢 পেজ লোড হয়েছে। 'Business' সিলেক্ট করা হচ্ছে...")
+        
+        try:
+            business_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Business')]/ancestor::*[@role='button' or @role='radio' or @tabindex][1]"))
+            )
+            driver.execute_script("arguments[0].click();", business_btn)
+            time.sleep(2)
+            
+            next_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Next')]"))
+            )
+            driver.execute_script("arguments[0].click();", next_btn)
+            bot.send_message(chat_id, "➡️ 'Business' সিলেক্ট করে 'Next' বাটনে ক্লিক করা হয়েছে।")
+        except Exception as e:
+            error_msg = str(e)
+            ss_path = log_error(driver, "Business Toggle Selection", error_msg)
+            bot.send_message(chat_id, f"⚠️ Business সিলেক্ট করতে সমস্যা: {error_msg}")
+            try:
+                with open(ss_path, 'rb') as photo:
+                    bot.send_photo(chat_id, photo, caption="Business টগল সিলেক্ট করার সময় এরর")
+            except:
+                pass
+            return
+        
+        try:
+            bot.send_message(chat_id, "⏳ Business ইনফো পেজ লোড হওয়ার জন্য অপেক্ষা করা হচ্ছে...")
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Best for retailers') or contains(text(), 'Learn about your followers')]"))
+            )
+            bot.send_message(chat_id, "🏢 Business ইনফো পেজ লোড হয়েছে। 'Next' বাটনে ক্লিক করা হচ্ছে...")
+            
+            next_btn_info = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Next')]"))
+            )
+            driver.execute_script("arguments[0].click();", next_btn_info)
+            time.sleep(2)
+        except:
+            pass 
+        
+        bot.send_message(chat_id, "⏳ ক্যাটাগরি পেজ লোড হওয়ার জন্য অপেক্ষা করা হচ্ছে...")
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Select a category')]")))
+        time.sleep(2)
+
+        used_cats = set()
+        if os.path.exists(USED_CATS_FILE):
+            with open(USED_CATS_FILE, "r", encoding="utf-8") as f:
+                used_cats = set(line.strip().lower() for line in f)
+
+        category_radios = driver.find_elements(By.XPATH, "//div[@role='radio' or @role='button']")
+        available_categories = []
+
+        for radio in category_radios:
+            try:
+                row = radio.find_element(By.XPATH, "./ancestor::div[contains(@class, '_aa61') or @role='button' or @tabindex][1]")
+                text = row.text.strip().split('\n')[0] 
+                
+                if not text:
+                    row = radio.find_element(By.XPATH, "..")
+                    text = row.text.strip().split('\n')[0]
+                    
+                if text and text.lower() not in used_cats and 'back' not in text.lower() and 'done' not in text.lower():
+                    available_categories.append((row, text))
+            except:
+                pass
+
+        if not available_categories:
+            if used_cats:
+                if os.path.exists(USED_CATS_FILE):
+                    os.remove(USED_CATS_FILE)
+                used_cats.clear()
+            for radio in category_radios:
+                try:
+                    row = radio.find_element(By.XPATH, "./ancestor::div[contains(@class, '_aa61') or @role='button' or @tabindex][1]")
+                    text = row.text.strip().split('\n')[0]
+                    if not text:
+                        row = radio.find_element(By.XPATH, "..")
+                        text = row.text.strip().split('\n')[0]
+                    if text and 'back' not in text.lower() and 'done' not in text.lower():
+                        available_categories.append((row, text))
+                except:
+                    pass
+
+        if available_categories:
+            chosen_el, chosen_text = random.choice(available_categories)
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", chosen_el)
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", chosen_el)
+            
+            bot.send_message(chat_id, f"📂 ক্যাটাগরি র‍্যান্ডমলি সিলেক্ট করা হয়েছে: {chosen_text}")
+            
+            with open(USED_CATS_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{chosen_text.lower()}\n")
+        else:
+            bot.send_message(chat_id, "⚠️ ক্যাটাগরি লিস্ট খুঁজে পাওয়া যায়নি!")
+
+        done_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Done')]")))
+        driver.execute_script("arguments[0].click();", done_btn)
+        bot.send_message(chat_id, "✅ ক্যাটাগরি সিলেক্ট করে 'Done' বাটনে ক্লিক করা হয়েছে।")
+        
+        bot.send_message(chat_id, "⏳ 'Switch to a professional account?' পেজের জন্য অপেক্ষা করা হচ্ছে...")
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Switch to a professional account')]"))
+        )
+        cont_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Continue') or contains(text(), 'Next')]")
+        driver.execute_script("arguments[0].click();", cont_btn)
+        bot.send_message(chat_id, "➡️ 'Continue' বাটনে ক্লিক করা হয়েছে।")
+        
+        try:
+            bot.send_message(chat_id, "⏳ ফাইনাল পেজের জন্য অপেক্ষা করা হচ্ছে...")
+            WebDriverWait(driver, 20).until(
+                lambda d: "review your contact info" in d.page_source.lower() or 
+                          "your instagram creator account is ready" in d.page_source.lower() or 
+                          "you're all set" in d.page_source.lower()
+            )
+            
+            page_src = driver.page_source.lower()
+            
+            if "review your contact info" in page_src:
+                bot.send_message(chat_id, "📞 'Review your contact info' পেজ এসেছে। 'Save' বাটনে ক্লিক করা হচ্ছে...")
+                save_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Save')]")))
+                driver.execute_script("arguments[0].click();", save_btn)
+                time.sleep(3)
+                
+            bot.send_message(chat_id, "⏳ 'Account is ready' পেজের জন্য অপেক্ষা করা হচ্ছে...")
+            WebDriverWait(driver, 20).until(
+                lambda d: "your instagram creator account is ready" in d.page_source.lower() or "you're all set" in d.page_source.lower()
+            )
+            done_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Done') or contains(text(), 'Finish') or contains(text(), 'OK')]")
+            driver.execute_script("arguments[0].click();", done_btn)
+            bot.send_message(chat_id, "✅ 'Done' বাটনে ক্লিক করা হয়েছে। প্রফেশনাল অ্যাকাউন্ট প্রস্তুত!")
+            
+        except Exception as e:
+            error_msg = str(e)
+            log_error(driver, "Review Contact / Account Ready Page", error_msg)
+            bot.send_message(chat_id, f"⚠️ ফাইনাল পেজে সমস্যা: {error_msg}")
+        
+        bot.send_message(chat_id, "🔄 ভেরিফিকেশনের জন্য আবার সেটিংস পেজে যাওয়া হচ্ছে...")
+        driver.get("https://www.instagram.com/accounts/settings/?entrypoint=profile")
+        
+        account_type_btn = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Account type and tools') or contains(text(), 'Business tools and controls')]"))
+        )
+        driver.execute_script("arguments[0].click();", account_type_btn)
+        
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Switch to creator account') or contains(text(), 'Switch to personal account') or contains(text(), 'Switch back to personal account')]")))
+        
+        if "switch to professional account" in driver.page_source.lower():
+            bot.send_message(chat_id, "❌ একাউন্টটি এখনও পারসনাল মোডে আছে। সুইচ হয়নি।")
+        else:
+            bot.send_message(chat_id, "✅ ভেরিফিকেশন সফল! একাউন্টটি এখন প্রফেশনাল মোডে আছে।")
+            handle_meta_business_suite(driver, username, email_to_invite, chat_id)
+        
+    except TimeoutException:
+        error_msg = "TimeoutException: একটি পেজ লোড হতে সময় নিচ্ছে বা এলিমেন্ট পাওয়া যায়নি।"
+        ss_path = log_error(driver, "Switch to Professional Timeout", error_msg)
+        bot.send_message(chat_id, f"⚠️ {error_msg} ব্রাউজার ম্যানুয়ালি চেক করুন।")
+        try:
+            with open(ss_path, 'rb') as photo:
+                bot.send_photo(chat_id, photo, caption="পেজ লোড না হওয়ার স্ক্রিনশট")
+        except:
+            pass
+    except Exception as e:
+        error_msg = str(e)
+        ss_path = log_error(driver, "Switch to Professional General Error", error_msg)
+        bot.send_message(chat_id, f"⚠️ প্রফেশনালে সুইচ করতে সমস্যা: {error_msg}")
+        try:
+            with open(ss_path, 'rb') as photo:
+                bot.send_photo(chat_id, photo, caption="এরর স্ক্রিনশট")
+        except:
+            pass
+
+
+def handle_meta_business_suite(driver, username, email_to_invite, chat_id):
+    try:
+        bot.send_message(chat_id, "🌐 https://business.facebook.com/ ওয়েবসাইটে যাওয়া হচ্ছে...")
+        driver.get("https://business.facebook.com/")
+        time.sleep(5)
+        
+        try:
+            bot.send_message(chat_id, "🔍 'Continue with Instagram' বাটন খোঁজা হচ্ছে...")
+            ig_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Continue with Instagram') or contains(text(), 'continue with instagram')]"))
+            )
+            driver.execute_script("arguments[0].click();", ig_btn)
+            bot.send_message(chat_id, "➡️ 'Continue with Instagram' বাটনে ক্লিক করা হয়েছে।")
+            time.sleep(8)
+        except:
+            bot.send_message(chat_id, "ℹ️ 'Continue with Instagram' বাটন পাওয়া যায়নি, স্কিপ করা হলো।")
+            
+        for _ in range(2):
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Take Meta Business Suite on the go with the mobile app')]"))
+                )
+                bot.send_message(chat_id, "📱 'Take Meta Business Suite on the go...' পপআপ পাওয়া গেছে। 'Done' বাটনে ক্লিক করা হচ্ছে...")
+                
+                done_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Done') or contains(text(), 'Close') or @aria-label='Close']")
+                driver.execute_script("arguments[0].click();", done_btn)
+                time.sleep(3)
+            except:
+                break
+
+        # 'Get started' পপ-আপ হ্যান্ডল
+        try:
+            get_started_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Get started')]"))
+            )
+            driver.execute_script("arguments[0].click();", get_started_btn)
+            bot.send_message(chat_id, "✅ 'Get started' পপ-আপে ক্লিক করা হয়েছে।")
+            time.sleep(3)
+        except:
+            pass
+
+        # =================: বিলিং পেজ ও স্ট্যাটাস চেক :=================
+        bot.send_message(chat_id, "📊 বিলিং পেজে যাওয়া হচ্ছে...")
+        driver.get("https://business.facebook.com/settings/billing")
+        time.sleep(6)
+        
+        try:
+            status_element = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'disabled')] | //*[contains(text(), 'Disabled')]"))
+            )
+            status_text = status_element.text
+            bot.send_message(chat_id, f"📈 এডস স্ট্যাটাস: {status_text}")
+        except:
+            body_text = driver.find_element(By.TAG_NAME, "body").text[:500]
+            bot.send_message(chat_id, f"ℹ️ স্ট্যাটাস স্পেসিফিক পাওয়া যায়নি। পেজের ডাটা:\n\n{body_text}")
+        #========================================================================
+
+        # =================: সেটিংস ও ইনভাইট পাঠানো :=================
+        bot.send_message(chat_id, "⚙️ ইউজার সেটিংস পেজে যাওয়া হচ্ছে...")
+        driver.get("https://business.facebook.com/settings/people")
+        time.sleep(5)
+        
+        try:
+            invite_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Invite people') or contains(text(), 'Add')]"))
+            )
+            driver.execute_script("arguments[0].click();", invite_btn)
+            time.sleep(2)
+            
+            email_box = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'email')]"))
+            )
+            email_box.send_keys(email_to_invite)
+            time.sleep(1)
+            
+            send_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Send') or contains(text(), 'Invite') or contains(text(), 'Next')]")
+            driver.execute_script("arguments[0].click();", send_btn)
+            time.sleep(3)
+            
+            bot.send_message(chat_id, f"✅ {email_to_invite} এ ইনভাইট পাঠানো হয়েছে!")
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ ইনভাইট পাঠাতে সমস্যা: {e}")
+        #========================================================================
+
+    except Exception as e:
+        error_msg = str(e)
+        log_error(driver, "Meta Business Suite", error_msg)
+        bot.send_message(chat_id, f"⚠️ Meta Business Suite পেজে সমস্যা: {error_msg}")
+
+
+def handle_code_entry(driver, username, chat_id, email_to_invite):
+    global waiting_for_code, received_code, active_driver
+    
+    try:
+        code_input = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='text'], input[inputmode='numeric'], input[name='code']"))
+        )
+        
+        while True:
+            bot.send_message(chat_id, "🔢 কোড বসানোর ঘর পাওয়া গেছে। অনুগ্রহ করে টেলিগ্রামে কোডটি পাঠান:")
+            
+            waiting_for_code = True
+            received_code = None
+            code_event.clear()
+            
+            if not code_event.wait(timeout=300):
+                bot.send_message(chat_id, "⏱️ সময় শেষ। আপনি কোড দেননি। ব্রাউজার বন্ধ করা হচ্ছে...")
+                waiting_for_code = False
+                cleanup_driver(driver)
+                active_driver = None
+                if browser_lock.locked():
+                    browser_lock.release()
+                return
+                
+            waiting_for_code = False
+            code_to_enter = received_code
+            
+            actions = ActionChains(driver)
+            actions.click(code_input).perform()
+            
+            actions.key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).perform()
+            actions.send_keys(Keys.DELETE).perform()
+            time.sleep(0.5)
+            
+            actions.send_keys(code_to_enter).perform()
+            time.sleep(1)
+            
+            bot.send_message(chat_id, "⌨️ কোড বসানো হয়েছে, ৩ বার Tab এবং Enter দেওয়া হচ্ছে...")
+            
+            actions.send_keys(Keys.TAB).perform()
+            time.sleep(0.5)
+            actions.send_keys(Keys.TAB).perform()
+            time.sleep(0.5)
+            actions.send_keys(Keys.TAB).perform()
+            time.sleep(0.5)
+            actions.send_keys(Keys.ENTER).perform()
+            
+            try:
+                WebDriverWait(driver, 15).until(
+                    lambda d: "auth_platform/codeentry" not in d.current_url or 
+                              "incorrect" in d.page_source.lower() or
+                              "try again" in d.page_source.lower() or
+                              "accounts/suspended" in d.current_url
+                )
+                
+                new_url = driver.current_url
+                new_source = driver.page_source.lower()
+                
+                if "accounts/suspended" in new_url or "confirm you're human to use your profile" in new_source:
+                    bot.send_message(chat_id, f"🚫 একাউন্টটি সাসপেন্ড করা হয়েছে! '{username}' ব্ল্যাকলিস্ট করা হলো।")
+                    blacklist.add(username.lower())
+                    with open("blacklist.txt", "a") as f:
+                        f.write(f"{username.lower()}\n")
+                    cleanup_driver(driver)
+                    active_driver = None
+                    browser_lock.release()
+                    return
+                
+                if "auth_platform/codeentry" in new_url or "incorrect" in new_source or "try again" in new_source:
+                    bot.send_message(chat_id, "❌ কোড ভুল হয়েছে! এখনও আগের পেজেই আছি। অনুগ্রহ করে আবার নতুন কোড পাঠান:")
+                    continue
+                else:
+                    bot.send_message(chat_id, "✅ কোড সফল হয়েছে! পেজ পরিবর্তন হয়েছে। ইনস্টাগ্রাম হোমে যাওয়ার চেষ্টা করা হচ্ছে...")
+                    check_home_page(driver, username, chat_id, email_to_invite)
+                    return
+                    
+            except TimeoutException:
+                error_msg = "TimeoutException: কোড দেওয়ার পর কোনো রেসপন্স আসছে না।"
+                log_error(driver, "Code Entry Response", error_msg)
+                bot.send_message(chat_id, f"⚠️ {error_msg} ব্রাউজার ম্যানুয়ালি চেক করুন।")
+                return
+                
+    except Exception as e:
+        error_msg = str(e)
+        log_error(driver, "Code Entry Process", error_msg)
+        bot.send_message(chat_id, f"⚠️ কোড বসানোর ঘর খুঁজে পাওয়া যায়নি বা অন্য কোনো সমস্যা হয়েছে: {error_msg}")
+        cleanup_driver(driver)
+        active_driver = None
+        if browser_lock.locked():
+            browser_lock.release()
+
+
+@bot.message_handler(commands=['stop'])
+def handle_stop(message):
+    global active_driver, waiting_for_code
+    if message.chat.id != YOUR_CHAT_ID:
+        return
+        
+    if active_driver:
+        if waiting_for_code:
+            waiting_for_code = False
+            code_event.set()
+            
+        bot.send_message(message.chat.id, "🍪 কুকিজ সংগ্রহ করা হচ্ছে এবং ব্রাউজার বন্ধ করা হচ্ছে...")
+        try:
+            cookies = active_driver.get_cookies()
+            cookie_json = json.dumps(cookies, indent=2)
+            
+            with open("cookies.json", "w") as f:
+                f.write(cookie_json)
+                
+            with open("cookies.json", "rb") as f:
+                bot.send_document(message.chat.id, f, caption="✅ এই কুকিজ ফাইলটি পরে যেকোনো ফ্রেশ ব্রাউজারে ব্যবহার করতে পারবেন।")
+                
+            os.remove("cookies.json")
+            
+            active_driver.delete_all_cookies()
+            active_driver.execute_script("window.sessionStorage.clear(); window.localStorage.clear();")
+            time.sleep(1)
+            
+            cleanup_driver(active_driver)
+            active_driver = None
+            browser_lock.release()
+            
+            bot.send_message(message.chat.id, "🛑 ব্রাউজার সফলভাবে বন্ধ হয়েছে এবং সব ডাটা ক্লিয়ার হয়েছে।")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"বন্ধ করার সময় সমস্যা: {e}")
+            cleanup_driver(active_driver)
+            active_driver = None
+            browser_lock.release()
+    else:
+        bot.send_message(message.chat.id, "বর্তমানে কোনো ব্রাউজার চলছে না।")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    global waiting_for_code, received_code
+    if message.chat.id != YOUR_CHAT_ID:
+        return
+        
+    text = message.text.strip()
+    
+    if text.start
+        text = message.text.strip()
+            if waiting_for_code:
+            received_code = text
+            code_event.set()
+            bot.reply_to(message, "📩 কোড গ্রহণ করা হয়েছে, বসানো হচ্ছে...")
+            return
+            
+        # ইউজারনেম এবং মেইল আলাদা করা
+        parts = text.split()
+        username = parts[0]
+        email_to_invite = parts[1] if len(parts) > 1 else None
+
+        if username.lower() in blacklist:
+            bot.reply_to(message, f"🚫 এই ইউজারনেম ({username}) ব্ল্যাকলিস্ট করা আছে (সাসপেন্ডেড)। অন্য ইউজারনেম দিন।")
+            return
+            
+        if not email_to_invite:
+            bot.reply_to(message, "⚠️ দয়া করে ইউজারনেম এবং ইনভাইট করার মেইল একসাথে দিন।\nযেমন: `username invite@email.com`", parse_mode="Markdown")
+            return
+
+        bot.reply_to(message, f"ইউজারনেম: {username}\nইনভাইট মেইল: {email_to_invite}\nEdge ব্রাউজারে লগিন করা হচ্ছে...")
+        
+        # থ্রেডে আর্গুমেন্ট হিসেবে ইউজারনেম এবং মেইল পাঠানো হচ্ছে
+        thread = threading.Thread(target=login_to_instagram, args=(username, message.chat.id, email_to_invite))
+        thread.start()
+
+if __name__ == "__main__":
+    print("বট চালু হয়েছে! টেলিগ্রামে বটকে ইউজারনেম এবং মেইল পাঠান। /stop দিলে বন্ধ হবে।")
+    bot.infinity_polling()
